@@ -217,6 +217,93 @@ def analyze_data_ai() -> str:
         return f"เกิดข้อผิดพลาดในการวิเคราะห์ข้อมูล: {str(e)}"
 
 
+def run_query_ai(question: str) -> str:
+    """
+    Text-to-SQL: รับคำถามภาษาธรรมชาติ → สร้าง SQL → รันคำสั่ง → แสดงผล
+    เป็น SELECT-only (ปลอดภัย: บล็อก INSERT/UPDATE/DELETE/DROP)
+    """
+    import sqlite3
+
+    DB_PATH = os.path.join(
+        os.environ.get("BACKEND_PATH", os.path.join(os.path.dirname(__file__), "../ai_bill_scanner")),
+        "bills_v2.db"
+    )
+
+    # โครงสร้าง DB สำหรับให้ AI รู้จัก
+    SCHEMA = """
+    Tables in bills_v2.db:
+    1. bills(id, invoice_no, supplier, date, po_ref, total, items_json, created_at)
+    2. preorders(id, customer_name, customer_phone, company_name, order_date, total_amount, items, status, created_at)
+    3. spare_parts(id, part_code, part_name, price, stock, created_at)
+    4. part_images(id, part_id, image_path, is_primary)
+    """
+
+    # Step 1: ให้ Typhoon สร้าง SQL
+    sql_prompt = [
+        {"role": "system", "content": (
+            f"You are a SQLite expert. Given this schema:\n{SCHEMA}\n"
+            "Generate a single, safe SELECT SQL query for the user's question. "
+            "Output ONLY the raw SQL — no markdown, no explanation, no semicolons."
+        )},
+        {"role": "user", "content": question}
+    ]
+
+    try:
+        sql_response = typhoon_client.chat.completions.create(
+            model="typhoon-v2.5-30b-a3b-instruct",
+            messages=sql_prompt,
+            temperature=0.1,
+            max_tokens=256
+        )
+        sql = sql_response.choices[0].message.content.strip()
+
+        # ลบ markdown ถ้ามี
+        if "```" in sql:
+            import re as _re
+            m = _re.search(r"```(?:sql)?\s*([\s\S]*?)\s*```", sql)
+            sql = m.group(1).strip() if m else sql.replace("```", "").strip()
+
+        print(f">>> [Text-to-SQL] Q: {question} | SQL: {sql}")
+
+        # Step 2: Safety check — อนุญาตเฉพาะ SELECT
+        sql_upper = sql.upper().strip()
+        forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "REPLACE", "TRUNCATE"]
+        if any(sql_upper.startswith(kw) or f" {kw} " in sql_upper for kw in forbidden):
+            return f"⚠️ ไม่อนุญาตรันคำสั่งนี้ครับ (Safety: เป็น write operation)\nSQL: {sql}"
+
+        if not sql_upper.startswith("SELECT"):
+            return f"⚠️ AI สร้าง SQL ที่ไม่ใช่ SELECT ครับ\nSQL: {sql}"
+
+        # Step 3: Execute
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(sql)
+        rows = cur.fetchall()
+        conn.close()
+
+        if not rows:
+            return "ไม่พบข้อมูลตรงกับเงื่อนไขที่ถามครับ"
+
+        # Step 4: Format result
+        headers = rows[0].keys()
+        result = f"📊 ผลลัพธ์ ({len(rows)} แถว):\n"
+        result += " | ".join(headers) + "\n"
+        result += "-" * 40 + "\n"
+        for row in rows[:20]:   # จำกัดไม่เกิน 20 แถว
+            result += " | ".join(str(v) if v is not None else "-" for v in row) + "\n"
+        if len(rows) > 20:
+            result += f"... (แสดง 20/{len(rows)} แถว)"
+
+        result += f"\n\n📝 SQL ที่ใช้: `{sql}`"
+        return result
+
+    except sqlite3.Error as e:
+        return f"❌ SQL Error: {str(e)}\nSQL ที่ AI สร้าง: {sql}"
+    except Exception as e:
+        return f"❌ เกิดข้อผิดพลาด: {str(e)}"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tool Dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
@@ -233,6 +320,7 @@ TOOL_MAP = {
     "update_inventory_ai":       lambda c: update_inventory_ai(c.get("part_code", ""), int(c.get("quantity", 0))),
     "delete_product_ai":         lambda c: delete_product_ai(c.get("part_code", "")),
     "analyze_data_ai":           lambda c: analyze_data_ai(),
+    "run_query_ai":              lambda c: run_query_ai(c.get("question", "")),
 }
 
 SYSTEM_INSTRUCTION = (
@@ -248,12 +336,14 @@ SYSTEM_INSTRUCTION = (
     '- Update Inventory: {"action":"update_inventory_ai","part_code":"...","quantity":...}\n'
     '- Delete Product: {"action":"delete_product_ai","part_code":"..."}\n'
     '- Analyze Data: {"action":"analyze_data_ai"}\n'
+    '- Custom Query (Text-to-SQL): {"action":"run_query_ai","question":"..."}\n'
     "Rules:\n"
     '1. items_json must be a valid JSON string: [{"part_name":"...","qty":1}]\n'
     "2. Always include customer_phone and company_name if mentioned.\n"
     "3. To list inventory, start reply with: 'รายการสินค้าในคลังทั้งหมด:'\n"
     "4. To list orders, start reply with: 'รายการพรีออเดอร์ล่าสุด:'\n"
     "5. To show order details, start reply with: 'รายละเอียดรายการ ID ...'\n"
+    "6. Use run_query_ai for any complex or custom data questions not covered by other tools.\n"
     "Be helpful and professional. Answer in Thai."
 )
 
