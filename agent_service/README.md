@@ -1,51 +1,133 @@
 # PartsPro AI Agent Service
 
-> **Microservice** สำหรับ AI Agent ที่ใช้ Typhoon LLM จัดการระบบสั่งซื้ออะไหล่รถยนต์  
-> แยกออกจาก Backend หลักเพื่อให้ระบบภายนอกสามารถเชื่อมต่อได้ผ่าน HTTP
+> **Production-ready Microservice** สำหรับ AI Agent ที่ใช้ Typhoon LLM  
+> แยกออกจาก Backend หลักอย่างสมบูรณ์ — คุยกัน **ผ่าน HTTP API เท่านั้น**  
+> ทุก tool call ป้องกันด้วย `X-Agent-Key` header
 
 ---
 
-## Architecture Overview
+## Architecture
 
 ```
-ระบบภายนอก / Frontend / LINE Bot
-         │
-         │  POST /chat
-         ▼
-┌─────────────────────────────┐
-│   agent_service  (Port 8001)│
-│   Typhoon LLM + Tool Calling│
-└────────────┬────────────────┘
-             │ import database.py
-             ▼
-    bills_v2.db (SQLite)
+[ LINE OA / Frontend / External System ]
+              │  POST /chat
+              ▼
+┌──────────────────────────┐    X-Agent-Key     ┌──────────────────────────┐
+│   agent_service          │ ─────────────────►  │   backend (main.py)      │
+│   Port: 8001             │ ◄─────────────────  │   Port: 8000             │
+│                          │    JSON response    │                          │
+│  - Typhoon LLM           │                     │  - FastAPI + SQLite      │
+│  - Tool Calling          │                     │  - bills_v2.db           │
+│  - Text-to-SQL proxy     │                     │  - LINE Webhook          │
+│                          │                     │  - Bill Scanner OCR      │
+│  ❌ ไม่มี DB             │                     │  ✅ owns DB ทั้งหมด      │
+│  ❌ ไม่มี shared code    │                     │                          │
+└──────────────────────────┘                     └──────────────────────────┘
 ```
 
 ---
 
-## Quick Start
+## ทดสอบบน Local 🖥️
 
-### 1. ติดตั้ง Dependencies
+> **ใช่! ทดสอบบน local ได้ทันที** โดยรันทั้ง 2 service พร้อมกันบนเครื่องเดียว
+
+### ขั้นตอน
+
+**1. เปิด Terminal 1 — รัน Backend (port 8000)**
+
+```bash
+cd ai_bill_scanner
+
+# ตั้งค่า env
+export GEMINI_API_KEY="AIza..."
+export LINE_CHANNEL_ACCESS_TOKEN="..."
+export LINE_CHANNEL_SECRET="..."
+export AGENT_API_KEY="local-test-key"   # ← กำหนดเองได้
+
+# รัน
+python main.py
+```
+
+**2. เปิด Terminal 2 — รัน Agent (port 8001)**
+
+```bash
+cd agent_service
+
+# copy .env
+cp .env.example .env
+# แก้ไข .env ให้ครบ:
+#   TYPHOON_API_KEY=sk-xxx
+#   BACKEND_API_URL=http://localhost:8000   ← ชี้ไปที่ local backend
+#   AGENT_API_KEY=local-test-key            ← ต้องตรงกับ backend
+
+python agent_service.py
+```
+
+**3. ทดสอบ Health Check**
+
+```bash
+# ตรวจสอบ agent + backend reachable
+curl http://localhost:8001/health
+```
+
+ผลลัพธ์ที่ถูกต้อง:
+```json
+{
+  "status": "ok",
+  "service": "agent_service",
+  "port": 8001,
+  "backend_url": "http://localhost:8000",
+  "backend_reachable": true
+}
+```
+
+**4. ทดสอบ Chat**
+
+```bash
+curl -X POST http://localhost:8001/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "มีสินค้าอะไรในคลังบ้าง"}],
+    "user_id": "test_user"
+  }'
+```
+
+---
+
+## การติดตั้ง
 
 ```bash
 cd agent_service
 pip install -r requirements.txt
-```
-
-### 2. ตั้งค่า Environment Variables
-
-```bash
-export TYPHOON_API_KEY="sk-xxxxxxxxxxxxxxxxxxxx"
-export BACKEND_PATH="../ai_bill_scanner"   # path ไปยังโฟลเดอร์ที่มี database.py
-```
-
-### 3. รัน Service
-
-```bash
+cp .env.example .env
+# แก้ไขค่าใน .env
 python agent_service.py
-# หรือ
-uvicorn agent_service:app --host 0.0.0.0 --port 8001 --reload
 ```
+
+---
+
+## Environment Variables
+
+### `agent_service/.env`
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `TYPHOON_API_KEY` | ✅ | — | API Key จาก https://opentyphoon.ai |
+| `BACKEND_API_URL` | ✅ | `http://localhost:8000` | URL ของ Backend service |
+| `AGENT_API_KEY` | ✅ | — | Shared secret กับ backend (ต้องตรงกัน) |
+| `AGENT_PORT` | ❌ | `8001` | Port ที่ agent รัน |
+
+### `ai_bill_scanner/.env` (Backend)
+
+| Variable | Required | Description |
+|---|---|---|
+| `GEMINI_API_KEY` | ✅ | Google Gemini สำหรับ OCR สแกนบิล |
+| `LINE_CHANNEL_ACCESS_TOKEN` | ✅ | LINE OA token |
+| `LINE_CHANNEL_SECRET` | ✅ | LINE OA secret |
+| `AGENT_API_KEY` | ✅ | Shared secret (ต้องตรงกับ agent) |
+
+> **หมายเหตุ:** `AGENT_API_KEY` ต้องเป็นค่าเดียวกันทั้งสอง `.env`  
+> ถ้า backend ไม่ตั้งค่า `AGENT_API_KEY` = development mode (ไม่มี auth)
 
 ---
 
@@ -53,14 +135,15 @@ uvicorn agent_service:app --host 0.0.0.0 --port 8001 --reload
 
 ### `GET /health`
 
-ตรวจสอบสถานะ service
+ตรวจสอบสถานะ service + ว่า backend reachable ไหม
 
-**Response:**
 ```json
 {
   "status": "ok",
   "service": "agent_service",
-  "port": 8001
+  "port": 8001,
+  "backend_url": "http://localhost:8000",
+  "backend_reachable": true
 }
 ```
 
@@ -68,172 +151,128 @@ uvicorn agent_service:app --host 0.0.0.0 --port 8001 --reload
 
 ### `POST /chat`
 
-ส่งข้อความสนทนาให้ AI และรับคำตอบกลับ
+**URL:** `http://localhost:8001/chat`
 
-**URL:** `http://localhost:8001/chat`  
-**Method:** `POST`  
-**Content-Type:** `application/json`
-
-#### Request Body
+#### Request
 
 ```json
 {
   "messages": [
-    { "role": "user", "content": "มีน้ำมันเครื่อง Castrol 5W-30 ไหมครับ" }
+    { "role": "user", "content": "มีน้ำมันเครื่อง Castrol ไหมครับ" }
   ],
-  "user_id": "Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  "user_id": "Uxxxxxxxxxxxxxx"
 }
 ```
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `messages` | `array` | ✅ | ประวัติการสนทนา (**ต้องส่งทุกครั้ง** เพื่อให้ AI จำบริบทได้) |
+| `messages` | `array` | ✅ | ประวัติการสนทนา (ต้องส่งทุกรอบสำหรับ multi-turn) |
 | `messages[].role` | `string` | ✅ | `"user"` หรือ `"assistant"` |
 | `messages[].content` | `string` | ✅ | ข้อความ |
 | `user_id` | `string` | ❌ | ID ผู้ใช้ (สำหรับ logging) |
 
-#### Response Body
+#### Response
 
 ```json
 {
   "reply": "มีครับ! [CAST-5W30] Castrol GTX 5W-30 ราคา 320 บาท เหลือ 48 ชิ้น",
-  "user_id": "Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "user_id": "Uxxxxxxxxxxxxxx",
   "tool_used": "search_products"
 }
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `reply` | `string` | ข้อความตอบกลับจาก AI |
-| `user_id` | `string` | ส่งกลับมาเหมือนเดิม |
-| `tool_used` | `string` | ชื่อ tool ที่ AI เรียกใช้ (ว่างถ้าไม่ได้ใช้ tool) |
-
----
-
-## ตัวอย่างการใช้งาน
-
-### Python (httpx)
-
-```python
-import httpx
-
-AGENT_URL = "http://localhost:8001"
-
-async def chat(messages: list[dict], user_id: str) -> str:
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        res = await client.post(
-            f"{AGENT_URL}/chat",
-            json={"messages": messages, "user_id": user_id}
-        )
-        return res.json()["reply"]
-
-# ตัวอย่างการใช้งาน
-messages = [
-    {"role": "user", "content": "ดูรายการสินค้าในคลังหน่อยครับ"}
-]
-reply = await chat(messages, user_id="user_001")
-print(reply)
-```
-
-### JavaScript (fetch)
-
-```javascript
-async function chat(messages, userId) {
-  const res = await fetch("http://localhost:8001/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, user_id: userId })
-  });
-  const data = await res.json();
-  return data.reply;
-}
-
-// ตัวอย่าง
-const messages = [
-  { role: "user", content: "สร้างออเดอร์ให้ลูกค้า สมชาย น้ำมันเครื่อง 2 ขวด" }
-];
-const reply = await chat(messages, "user_001");
-console.log(reply);
-```
-
-### cURL
-
-```bash
-curl -X POST http://localhost:8001/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [{"role": "user", "content": "มีอะไหล่อะไรบ้าง"}],
-    "user_id": "test_user"
-  }'
 ```
 
 ---
 
 ## Tool Capabilities
 
-AI Agent มีความสามารถต่อไปนี้ (เรียกใช้ tool อัตโนมัติจากภาษาธรรมชาติ):
-
-| Tool | คำสั่งตัวอย่าง |
-|---|---|
-| `search_products` | "มีผ้าเบรค Brembo ไหม" |
-| `get_inventory_ai` | "ดูสินค้าในคลังทั้งหมด" |
-| `create_preorder_ai` | "สั่งน้ำมันเครื่อง 5 ขวดให้สมชาย" |
-| `get_preorders_ai` | "ดูรายการออเดอร์ทั้งหมด" |
-| `get_order_details_ai` | "ดูรายละเอียดออเดอร์ ID 3" |
-| `update_preorder_status_ai` | "อนุมัติออเดอร์ ID 3" |
-| `add_product_ai` | "เพิ่มสินค้าใหม่ ไส้กรองอากาศ ราคา 250" |
-| `update_inventory_ai` | "อัปเดตสต็อก SKU-001 เป็น 50 ชิ้น" |
-| `delete_product_ai` | "ลบสินค้า รหัส AI-1234" |
-| `analyze_data_ai` | "สรุปยอดขายทั้งหมด" |
+| Tool | คำสั่งตัวอย่าง | Backend Endpoint |
+|---|---|---|
+| `search_products` | "มีผ้าเบรค Brembo ไหม" | `GET /api/agent/parts/search` |
+| `get_inventory_ai` | "ดูสินค้าในคลังทั้งหมด" | `GET /api/parts` |
+| `create_preorder_ai` | "สั่งน้ำมัน 5 ขวดให้สมชาย" | `POST /api/preorders` |
+| `get_preorders_ai` | "ดูรายการออเดอร์ทั้งหมด" | `GET /api/agent/preorders` |
+| `get_order_details_ai` | "ดูออเดอร์ ID 3" | `GET /api/agent/preorders/{id}` |
+| `update_preorder_status_ai` | "อนุมัติออเดอร์ ID 3" | `PATCH /api/agent/preorders/{id}/status` |
+| `add_product_ai` | "เพิ่มสินค้า ไส้กรอง ราคา 250" | `POST /api/parts/add` |
+| `update_inventory_ai` | "อัปเดตสต็อก SKU-001 เป็น 50" | `PATCH /api/agent/parts/{code}/stock` |
+| `delete_product_ai` | "ลบสินค้า รหัส AI-1234" | `DELETE /api/agent/parts/{code}` |
+| `analyze_data_ai` | "สรุปยอดขายทั้งหมด" | `GET /api/agent/analysis` |
+| `run_query_ai` | "ยอดขายเดือนนี้เท่าไหร่" | `POST /api/agent/query` (Text-to-SQL) |
 
 ---
 
-## Multi-turn Conversation (การสนทนาต่อเนื่อง)
+## Multi-turn Conversation
 
-Agent ไม่มี built-in session — **ระบบที่เรียกใช้ต้องเก็บ history เอง** และส่งมาทุกครั้ง
+Agent ไม่มี built-in session — **ระบบที่เรียกต้องเก็บ history เองและส่งมาทุกครั้ง**
 
 ```python
-# ✅ ถูกต้อง: ส่ง history ทุกครั้ง
+import httpx
+
 history = []
 
-def send(text: str):
+def send(text: str) -> str:
     history.append({"role": "user", "content": text})
-    reply = chat(history, user_id="u001")
+    res = httpx.post("http://localhost:8001/chat",
+                     json={"messages": history, "user_id": "u001"})
+    reply = res.json()["reply"]
     history.append({"role": "assistant", "content": reply})
+    # แนะนำ: จำกัด history ไม่เกิน 10 messages
+    if len(history) > 10:
+        history[:] = history[-10:]
     return reply
 
-send("มีน้ำมันเครื่อง Castrol ไหม")
-send("ราคาเท่าไหร่")          # AI จะยังจำบริบทว่าถาม Castrol
-send("สั่ง 3 ขวดได้เลย")     # AI จะสร้าง preorder อัตโนมัติ
+send("มีน้ำมัน Castrol ไหม")
+send("ราคาเท่าไหร่")       # AI ยังจำบริบทว่าถามเรื่อง Castrol
+send("สั่ง 3 ขวดเลย")      # AI สร้าง preorder อัตโนมัติ
 ```
 
-> **หมายเหตุ:** แนะนำให้จำกัด history ไม่เกิน **10 messages** เพื่อประสิทธิภาพ
+---
+
+## Production Deployment
+
+```bash
+# Server A — Backend
+export GEMINI_API_KEY="AIza..."
+export LINE_CHANNEL_ACCESS_TOKEN="..."
+export LINE_CHANNEL_SECRET="..."
+export AGENT_API_KEY="your-strong-secret"   # ← เปลี่ยน!
+python main.py                              # port 8000
+
+# Server B — Agent (คนละ server ได้เลย)
+export TYPHOON_API_KEY="sk-..."
+export BACKEND_API_URL="http://<IP_SERVER_A>:8000"
+export AGENT_API_KEY="your-strong-secret"   # ← ต้องตรงกัน
+export AGENT_PORT=8001
+python agent_service.py
+```
 
 ---
 
-## Error Handling
+## Backend Agent Endpoints (ต้องมี `X-Agent-Key`)
 
-| กรณี | Reply ที่ได้รับ |
-|---|---|
-| Agent service ไม่ได้รัน | `"ขออภัยครับ ไม่สามารถเชื่อมต่อ Agent Service ได้..."` |
-| Response timeout (>60s) | `"ขออภัยครับ Agent ใช้เวลาตอบสนองนานเกินไป..."` |
-| Internal error | `"ขออภัยครับ ระบบ Agent ขัดข้อง (Error: ...)"` |
+Endpoints เหล่านี้ถูกเพิ่มไว้ใน `main.py` สำหรับให้ agent เรียกโดยเฉพาะ:
 
----
+```
+GET    /api/agent/preorders
+GET    /api/agent/preorders/{id}
+PATCH  /api/agent/preorders/{id}/status
+GET    /api/agent/parts/search?q=...
+PATCH  /api/agent/parts/{code}/stock
+DELETE /api/agent/parts/{code}
+GET    /api/agent/analysis
+POST   /api/agent/query          ← Text-to-SQL (SELECT only)
+```
 
-## Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `TYPHOON_API_KEY` | *(required)* | API Key จาก https://opentyphoon.ai |
-| `BACKEND_PATH` | `../ai_bill_scanner` | Path ไปยังโฟลเดอร์ที่มี `database.py` |
+ระบบภายนอกที่ต้องการเรียก endpoints เหล่านี้โดยตรงต้องส่ง:
+```
+X-Agent-Key: your-agent-api-key
+```
 
 ---
 
 ## Swagger UI
 
-เมื่อ service รันแล้ว เข้าดู API docs ได้ที่:
-
 ```
-http://localhost:8001/docs
+http://localhost:8001/docs    ← Agent Service API Docs
+http://localhost:8000/docs    ← Backend API Docs
 ```
