@@ -324,27 +324,26 @@ TOOL_MAP = {
 }
 
 SYSTEM_INSTRUCTION = (
-    "You are 'PartsPro AI Assistant' created by SCB 10X. You help the Shop Owner. "
-    "To use tools, you MUST output a JSON object ONLY in that turn:\n"
-    '- Search: {"action":"search_products","query":"..."}\n'
-    '- Order: {"action":"create_preorder_ai","customer_name":"...","items_json":"...","customer_phone":"...","company_name":"..."}\n'
-    '- Add Product: {"action":"add_product_ai","part_name":"...","price":...}\n'
-    '- List Orders: {"action":"get_preorders_ai"}\n'
-    '- Order Details: {"action":"get_order_details_ai","order_id":...}\n'
-    '- Update Order: {"action":"update_preorder_status_ai","order_id":...,"status":"..."}\n'
-    '- List Inventory: {"action":"get_inventory_ai"}\n'
-    '- Update Inventory: {"action":"update_inventory_ai","part_code":"...","quantity":...}\n'
-    '- Delete Product: {"action":"delete_product_ai","part_code":"..."}\n'
-    '- Analyze Data: {"action":"analyze_data_ai"}\n'
-    '- Custom Query (Text-to-SQL): {"action":"run_query_ai","question":"..."}\n'
-    "Rules:\n"
-    '1. items_json must be a valid JSON string: [{"part_name":"...","qty":1}]\n'
-    "2. Always include customer_phone and company_name if mentioned.\n"
-    "3. To list inventory, start reply with: 'รายการสินค้าในคลังทั้งหมด:'\n"
-    "4. To list orders, start reply with: 'รายการพรีออเดอร์ล่าสุด:'\n"
-    "5. To show order details, start reply with: 'รายละเอียดรายการ ID ...'\n"
-    "6. Use run_query_ai for any complex or custom data questions not covered by other tools.\n"
-    "Be helpful and professional. Answer in Thai."
+    "You are 'PartsPro AI Assistant'. You help Thai shop owners manage spare parts inventory and orders. "
+    "IMPORTANT: When you need data from the system, output ONLY a raw JSON tool call — nothing else.\n\n"
+    "AVAILABLE TOOLS (output exactly as shown):\n"
+    '- สื่อสินค้า: {"action":"search_products","query":"..."}\n'
+    '- สร้างออเดอร์: {"action":"create_preorder_ai","customer_name":"...","items_json":"[{\\"part_name\\":\\"...\\",\\"qty\\":1}]","customer_phone":"","company_name":""}\n'
+    '- เพิ่มสินค้าใหม่: {"action":"add_product_ai","part_name":"...","price":0.0}\n'
+    '- ดูรายการออเดอร์ทั้งหมด: {"action":"get_preorders_ai"}\n'
+    '- ดูรายละเอียดออเดอร์: {"action":"get_order_details_ai","order_id":1}\n'
+    '- อัพเดตสถานะออเดอร์: {"action":"update_preorder_status_ai","order_id":1,"status":"Approved"}\n'
+    '- ดูสินค้าในคลัง: {"action":"get_inventory_ai"}\n'
+    '- อัพเดตสต็อก: {"action":"update_inventory_ai","part_code":"SKU-001","quantity":50}\n'
+    '- ลบสินค้า: {"action":"delete_product_ai","part_code":"SKU-001"}\n'
+    '- วิเคราะห์ข้อมูลร้าน: {"action":"analyze_data_ai"}\n'
+    '- คำถามพิเศษ (Text-to-SQL): {"action":"run_query_ai","question":"..."}\n\n'
+    "RULES:\n"
+    "1. Output ONLY the JSON when calling a tool — no text before or after.\n"
+    '2. items_json must be a JSON string: "[{\\"part_name\\":\\"...\\",\\"qty\\":1}]"\n'
+    "3. For inventory list use get_inventory_ai (not add_product_ai).\n"
+    "4. For complex/custom data questions use run_query_ai.\n"
+    "5. Answer in Thai after receiving RESULT."
 )
 
 
@@ -356,7 +355,7 @@ def _run_chat(messages: list[dict]) -> tuple[str, str]:
     local_messages = list(messages)
     tool_used = ""
 
-    for _ in range(2):
+    for _ in range(3):  # เพิ่มเป็น 3 rounds
         formatted = [{"role": "system", "content": SYSTEM_INSTRUCTION}] + local_messages
         response = typhoon_client.chat.completions.create(
             model="typhoon-v2.5-30b-a3b-instruct",
@@ -369,21 +368,22 @@ def _run_chat(messages: list[dict]) -> tuple[str, str]:
         if not ai_response:
             return "รับทราบครับเจ้าของร้าน", tool_used
 
-        if '{"action":' in ai_response:
-            match = re.search(r'(\{.*"action".*\})', ai_response, re.DOTALL)
-            if match:
-                try:
-                    tool_call = json.loads(match.group(1))
-                    action = tool_call.get("action")
-                    executor = TOOL_MAP.get(action)
-                    if executor:
-                        tool_used = action
-                        tool_result = executor(tool_call)
-                        local_messages.append({"role": "assistant", "content": ai_response})
-                        local_messages.append({"role": "user", "content": f"RESULT: {tool_result}"})
-                        continue
-                except Exception:
-                    pass
+        # ตรวจหา tool call JSON (รองรับทั้ง {"action": และ { "action": )
+        json_match = re.search(r'\{\s*"action"\s*:.*?\}', ai_response, re.DOTALL)
+        if json_match:
+            try:
+                tool_call = json.loads(json_match.group(0))
+                action = tool_call.get("action")
+                executor = TOOL_MAP.get(action)
+                if executor:
+                    tool_used = action
+                    print(f">>> [Tool] Calling: {action}")
+                    tool_result = executor(tool_call)
+                    local_messages.append({"role": "assistant", "content": ai_response})
+                    local_messages.append({"role": "user", "content": f"RESULT: {tool_result}"})
+                    continue
+            except Exception as e:
+                print(f">>> [Tool Parse Error] {e} | raw: {json_match.group(0)[:100]}")
 
         return ai_response, tool_used
 
